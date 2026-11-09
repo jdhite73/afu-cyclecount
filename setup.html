@@ -241,6 +241,12 @@
 
   const TYPE_KEYS = ["text", "number", "choice", "boolean", "dateTime", "hyperlinkOrPicture"];
   const typeOf = (col) => TYPE_KEYS.find((k) => col[k] !== undefined && col[k] !== null);
+  // Graph doesn't report the type of hyperlink columns when reading them back, so a hyperlink column
+  // shows up with no type at all. Accept that for hyperlinkOrPicture only.
+  const sameType = (have, want) => {
+    const h = typeOf(have), w = typeOf(want);
+    return h === w || (w === "hyperlinkOrPicture" && h === undefined);
+  };
 
   const state = { account: null, siteId: null, listIds: {}, csvSkus: null };
 
@@ -413,10 +419,8 @@
         have = await graph("POST", `/sites/${s}/lists/${listId}/columns`, col);
         added++;
       }
-      const wantType = typeOf(want);
-      const haveType = typeOf(have);
-      if (haveType !== wantType) {
-        problems.push(`${want.name} is ${haveType || "an unknown type"}, expected ${wantType}`);
+      if (!sameType(have, want)) {
+        problems.push(`${want.name} is ${typeOf(have) || "an unknown type"}, expected ${typeOf(want)}`);
         continue;
       }
       if (want.indexed && !have.indexed) {
@@ -434,7 +438,7 @@
     cols = await graphAll(`/sites/${s}/lists/${listId}/columns`);
     const ok = def.columns.filter((w) => {
       const h = cols.find((c) => c.name === w.name);
-      return h && typeOf(h) === typeOf(w) && (!w.indexed || h.indexed);
+      return h && sameType(h, w) && (!w.indexed || h.indexed);
     }).length;
 
     return { name: def.name, created, added, ok, total: def.columns.length, problems };
