@@ -8,6 +8,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@2.38.3/lib/msal-browser.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <style>
   :root {
     --paper: #f7f9fc;
@@ -21,6 +22,10 @@
     --fail: #b3261e;
     --warn: #8a5a00;
     --warn-soft: #fdf3dc;
+    --pos-bg: #fff4c2;
+    --pos-ink: #6b4d00;
+    --neg-bg: #fde3e1;
+    --neg-ink: #8c1d16;
     color-scheme: light;
   }
   @media (prefers-color-scheme: dark) {
@@ -36,6 +41,10 @@
       --fail: #f08a80;
       --warn: #e6b450;
       --warn-soft: #2f2817;
+      --pos-bg: #3a3214;
+      --pos-ink: #f5d76e;
+      --neg-bg: #3d1d1b;
+      --neg-ink: #f5a39b;
       color-scheme: dark;
     }
   }
@@ -161,6 +170,40 @@
   #authbar { display: none; background: var(--warn-soft); border-bottom: 2px solid var(--warn); padding: 12px 24px; }
   #authbar.show { display: flex; gap: 16px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
 
+  .reviewer .actions { display: flex; gap: 12px; flex-wrap: wrap; margin: 12px 0 20px; }
+  .snap-status { margin: 0 0 4px; }
+
+  .summary { display: flex; flex-wrap: wrap; gap: 10px 28px; margin: 8px 0 20px; }
+  .summary div { font-size: 1.05rem; }
+  .summary strong { font-size: 1.4rem; display: block; line-height: 1.2; }
+  .table-wrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; margin-bottom: 20px; }
+  table.var { border-collapse: collapse; width: 100%; min-width: 720px; }
+  table.var th, table.var td { padding: 10px 14px; border-bottom: 1px solid var(--rule); text-align: left; vertical-align: top; }
+  table.var tr:last-child td { border-bottom: 0; }
+  table.var th { font-size: 0.85rem; color: var(--muted); }
+  table.var td.num, table.var th.num { text-align: right; }
+  table.var tr.pos td { background: var(--pos-bg); }
+  table.var tr.pos td.diff { color: var(--pos-ink); font-weight: 700; }
+  table.var tr.neg td { background: var(--neg-bg); }
+  table.var tr.neg td.diff { color: var(--neg-ink); font-weight: 700; }
+  table.var td.pick { width: 48px; }
+  table.var td.pick input { width: 24px; height: 24px; }
+  .caselabel { display: block; font-size: 0.85rem; font-weight: 400; }
+  .small { font-size: 0.85rem; color: var(--muted); }
+  .tag { display: inline-block; font-size: 0.8rem; font-weight: 700; padding: 2px 8px; border-radius: 4px; background: var(--warn-soft); color: var(--warn); }
+  .linkish { background: none; border: 0; padding: 0; min-height: 0; color: var(--blue); text-decoration: underline; font-weight: 400; font-size: 0.85rem; }
+  .sticky-act {
+    position: sticky; bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+    display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;
+    background: var(--surface); border: 2px solid var(--blue); border-radius: 10px; padding: 12px 16px; margin-bottom: 20px;
+  }
+  details.section { margin-bottom: 20px; }
+  details.section summary { cursor: pointer; font-weight: 700; padding: 8px 0; }
+  .file-pick { display: inline-block; }
+  .file-pick input { font: inherit; }
+  .confirm { display: flex; gap: 10px; align-items: flex-start; margin: 16px 0; max-width: 64ch; }
+  .confirm input { width: 24px; height: 24px; flex: none; margin-top: 2px; }
+
   @media (max-width: 760px) {
     main { padding: 16px; }
     .row-head { display: none; }
@@ -203,10 +246,12 @@
   const AREAS = ["Downstairs", "Upstairs 1", "Upstairs 2", "Upstairs 4", "Upstairs M11 M13", "Back Room"];
   const LIST = { skus: "Count SKUs", sessions: "Count Sessions", entries: "Count Entries", snapshot: "SellerCloud Snapshot" };
   const ENTRY_FIELDS = "Title,SessionId,Area,CaseQty,FullCases,LooseFilters,Total,Round,CountedBy,CountedAt,Note";
+  const INDEXED = { Prefer: "HonorNonIndexedQueriesWarningMayFailRandomly" };
 
   const state = {
     account: null, siteId: null, lists: {}, isReviewer: false,
-    skus: [], session: null, extraOpenSessions: 0, entries: [], recountDone: []
+    skus: [], session: null, extraOpenSessions: 0, entries: [], recountDone: [],
+    snapshot: null, snapshotFor: null, pollTimer: null, picked: new Set(), parsedExport: null
   };
 
   // ---------- helpers ----------
@@ -329,9 +374,9 @@
   }
 
   async function loadSession() {
-    const items = await graphAll(`${listPath("sessions")}/items?$expand=fields($select=Title,Status)&$top=500`);
+    const items = await graphAll(`${listPath("sessions")}/items?$expand=fields($select=Title,Status,SnapshotLoadedAt)&$top=500`);
     const open = items
-      .map((it) => ({ id: Number(it.id), title: it.fields.Title, status: it.fields.Status }))
+      .map((it) => ({ id: Number(it.id), title: it.fields.Title, status: it.fields.Status, snapshotAt: it.fields.SnapshotLoadedAt || null }))
       .filter((s) => s.status !== "Finalized")
       .sort((a, b) => b.id - a.id);
     state.session = open[0] || null;
@@ -342,7 +387,7 @@
     if (!state.session) { state.entries = []; return; }
     const items = await graphAll(
       `${listPath("entries")}/items?$expand=fields($select=${ENTRY_FIELDS})&$filter=fields/SessionId eq ${state.session.id}&$top=500`,
-      { Prefer: "HonorNonIndexedQueriesWarningMayFailRandomly" }
+      INDEXED
     );
     state.entries = items.map((it) => ({
       itemId: String(it.id), sku: it.fields.Title, round: Number(it.fields.Round) || 1,
@@ -362,6 +407,33 @@
     .filter((e) => e.round > 1 && !isComplete(e))
     .sort((a, b) => (a.sku < b.sku ? -1 : 1));
 
+  // The count that stands for a SKU is its highest completed round.
+  function latestComplete(sku) {
+    return entriesFor(sku).filter(isComplete).sort((a, b) => b.round - a.round)[0] || null;
+  }
+  const maxRound = (sku) => entriesFor(sku).reduce((m, e) => Math.max(m, e.round), 0);
+  const recountPending = (sku) => entriesFor(sku).some((e) => e.round > 1 && !isComplete(e));
+
+  async function loadSnapshot(force) {
+    if (!state.isReviewer || !state.session) { state.snapshot = null; return; }
+    if (!force && state.snapshotFor === state.session.id && state.snapshot) return;
+    const items = await graphAll(
+      `${listPath("snapshot")}/items?$expand=fields($select=Title,ProductName,OnHand,SessionId)&$filter=fields/SessionId eq ${state.session.id}&$top=500`,
+      INDEXED
+    );
+    state.snapshot = items.map((it) => ({
+      itemId: String(it.id), sku: it.fields.Title, name: it.fields.ProductName || "",
+      onHand: isNum(it.fields.OnHand) ? it.fields.OnHand : 0
+    }));
+    state.snapshotFor = state.session.id;
+  }
+
+  async function setStatus(status) {
+    if (!state.session || state.session.status === status) return;
+    await graph("PATCH", `${listPath("sessions")}/items/${state.session.id}/fields`, { Status: status });
+    state.session.status = status;
+  }
+
   function areaStats(area) {
     const list = state.skus.filter((s) => s.area === area);
     return { total: list.length, counted: list.filter((s) => isCounted(s.sku)).length };
@@ -379,6 +451,8 @@
   function currentView() {
     const h = decodeURIComponent(location.hash.slice(1));
     if (h === "recount") return { name: "recount" };
+    if (h === "variance") return { name: "variance" };
+    if (h === "import") return { name: "import" };
     if (h.startsWith("area=")) {
       const area = h.slice(5);
       if (AREAS.includes(area)) return { name: "area", area };
@@ -394,15 +468,24 @@
   function renderHeader() {
     $("#who").textContent = state.account ? state.account.name || state.account.username : "";
     $("#btn-signout").hidden = !state.account;
-    $("#session-label").textContent = state.session ? `${sessionLabel(state.session.title)} count` : "";
+    $("#session-label").textContent = state.session
+      ? `${sessionLabel(state.session.title)} count${state.session.status === "Review" ? ", in review" : ""}` : "";
   }
 
   function render() {
+    clearInterval(state.pollTimer);
+    state.pollTimer = null;
     renderHeader();
     const v = currentView();
-    if (!state.session && v.name !== "home") { history.replaceState(null, "", "#home"); return renderHome(); }
+    const reviewerOnly = v.name === "variance" || v.name === "import";
+    if ((!state.session && v.name !== "home") || (reviewerOnly && !state.isReviewer)) {
+      history.replaceState(null, "", "#home");
+      return renderHome();
+    }
     if (v.name === "area") return renderArea(v.area);
     if (v.name === "recount") return renderRecount();
+    if (v.name === "variance") return renderVariance();
+    if (v.name === "import") return renderImport();
     return renderHome();
   }
 
@@ -458,7 +541,14 @@
         <section class="reviewer">
           <h2>Reviewer</h2>
           ${state.extraOpenSessions > 0 ? `<p class="state warn">${state.extraOpenSessions} older session${state.extraOpenSessions > 1 ? "s are" : " is"} also still open. Only the newest one is shown.</p>` : ""}
-          <p class="muted">Session status: ${esc(state.session.status || "Counting")}. Variance review, recount requests and Finalize arrive in the next build step.</p>
+          <p class="snap-status">${state.session.snapshotAt
+            ? `SellerCloud snapshot imported ${esc(new Date(state.session.snapshotAt).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" }))}.`
+            : "SellerCloud snapshot not imported yet. Run the Inventory Comparison task once counting has started, then import it here."}</p>
+          <div class="actions">
+            <button ${state.session.snapshotAt ? "" : "disabled"} id="btn-variance">Review variances</button>
+            <button class="secondary" id="btn-import">${state.session.snapshotAt ? "Re-import snapshot" : "Import SellerCloud snapshot"}</button>
+          </div>
+          <p class="muted">Finalize arrives in the next build step.</p>
           <button class="danger" id="btn-discard">Discard this session</button>
         </section>` : ""}`;
 
@@ -467,6 +557,275 @@
     if (rc) rc.addEventListener("click", () => { state.recountDone = []; go("recount"); });
     const dz = $("#btn-discard");
     if (dz) dz.addEventListener("click", discardSession);
+    const bv = $("#btn-variance");
+    if (bv) bv.addEventListener("click", () => go("variance"));
+    const bi = $("#btn-import");
+    if (bi) bi.addEventListener("click", () => { state.parsedExport = null; go("import"); });
+  }
+
+  // ---------- reviewer: snapshot import ----------
+  function parseExport(arrayBuffer) {
+    const wb = XLSX.read(new Uint8Array(arrayBuffer), { type: "array" });
+    const sheet = wb.Sheets[wb.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(sheet, { defval: null, raw: true });
+    if (!rows.length) throw new Error("The file has no rows.");
+    const cols = Object.keys(rows[0]);
+    for (const need of ["ProductID", "Total"]) {
+      if (!cols.includes(need)) throw new Error(`This doesn't look like the Inventory Comparison export: there's no ${need} column. Found: ${cols.join(", ")}`);
+    }
+    const seen = new Set(), keep = [], problems = [];
+    rows.forEach((r, i) => {
+      const sku = String(r.ProductID == null ? "" : r.ProductID).trim();
+      if (!sku) return;
+      const onHand = Number(String(r.Total == null ? "" : r.Total).replace(/,/g, ""));
+      if (seen.has(sku)) { problems.push(`Row ${i + 2}: ${sku} appears twice; the first one is used`); return; }
+      if (!Number.isFinite(onHand)) { problems.push(`Row ${i + 2}: ${sku} has no usable Total`); return; }
+      seen.add(sku);
+      // Only SKU, name and on-hand are kept. Cost, value and every other column stay on this computer.
+      keep.push({ sku, name: r.ProductName == null ? "" : String(r.ProductName).trim(), onHand });
+    });
+    return { rows: keep, problems, dropped: cols.filter((c) => !["ProductID", "ProductName", "Total"].includes(c)) };
+  }
+
+  function renderImport() {
+    const p = state.parsedExport;
+    const known = new Set(state.skus.map((s) => s.sku));
+    $("#app").innerHTML = `
+      <button class="back" id="btn-back">‹ Home</button>
+      <h1>Import SellerCloud snapshot</h1>
+      <p>Run the <strong>Inventory Comparison</strong> task in SellerCloud after counting has started, then choose the file it produces.</p>
+      <label class="file-pick"><input type="file" id="file-export" accept=".xlsx,.xls,.csv"></label>
+      <div id="import-preview">${p ? `
+        <h2 style="margin-top:24px">${p.rows.length} SKUs, ${p.rows.reduce((t, r) => t + r.onHand, 0).toLocaleString()} units on hand</h2>
+        <p class="muted">Only SKU, product name and on-hand quantity are imported. ${p.dropped.length} other columns, including cost and value, are ignored and never leave this computer.</p>
+        ${p.rows.filter((r) => !known.has(r.sku)).length ? `<p class="state warn">${p.rows.filter((r) => !known.has(r.sku)).length} SKUs in the file aren't in Count SKUs. They'll be flagged on the Variance screen.</p>` : ""}
+        ${p.problems.length ? `<p class="state warn">${p.problems.map(esc).join("<br>")}</p>` : ""}
+        ${state.session.snapshotAt ? `<p class="state warn">This replaces the snapshot already imported for this session.</p>` : ""}
+        <label class="confirm"><input type="checkbox" id="chk-pulled"> <span>The morning's shipments were printed and pulled before this export ran.</span></label>
+        <button id="btn-do-import" disabled>Import ${p.rows.length} SKUs</button>
+        <div id="import-progress" class="muted" style="margin-top:12px"></div>` : ""}</div>`;
+
+    $("#btn-back").addEventListener("click", () => go("home"));
+    $("#file-export").addEventListener("change", async (ev) => {
+      const f = ev.target.files[0];
+      if (!f) return;
+      try {
+        state.parsedExport = parseExport(await f.arrayBuffer());
+        renderImport();
+      } catch (e) {
+        state.parsedExport = null;
+        $("#import-preview").innerHTML = `<p class="state bad" style="margin-top:16px">${esc(e.message)}</p>`;
+      }
+    });
+    const chk = $("#chk-pulled");
+    if (chk) chk.addEventListener("change", () => { $("#btn-do-import").disabled = !chk.checked; });
+    const btn = $("#btn-do-import");
+    if (btn) btn.addEventListener("click", importSnapshot);
+  }
+
+  async function importSnapshot() {
+    const btn = $("#btn-do-import");
+    btn.disabled = true;
+    $("#chk-pulled").disabled = true;
+    const prog = $("#import-progress");
+    const rows = state.parsedExport.rows;
+    try {
+      await loadSnapshot(true);
+      if (state.snapshot.length) {
+        let d = 0;
+        await pool(state.snapshot, 6, async (r) => {
+          await graph("DELETE", `${listPath("snapshot")}/items/${r.itemId}`);
+          prog.textContent = `Removing the earlier snapshot… ${++d} of ${state.snapshot.length}`;
+        });
+      }
+      let n = 0;
+      await pool(rows, 6, async (r) => {
+        await graph("POST", `${listPath("snapshot")}/items`, {
+          fields: { Title: r.sku, SessionId: state.session.id, ProductName: r.name, OnHand: r.onHand }
+        });
+        prog.textContent = `Importing… ${++n} of ${rows.length}`;
+      });
+      const now = new Date().toISOString();
+      await graph("PATCH", `${listPath("sessions")}/items/${state.session.id}/fields`, { SnapshotLoadedAt: now });
+      state.session.snapshotAt = now;
+      await loadSnapshot(true);
+      if (state.snapshot.length !== rows.length) throw new Error(`Only ${state.snapshot.length} of ${rows.length} rows are in SharePoint. Import again to replace them.`);
+      state.parsedExport = null;
+      toast(`Snapshot imported: ${rows.length} SKUs`);
+      go("variance");
+    } catch (e) {
+      if (e instanceof AuthNeeded) return;
+      prog.innerHTML = `<span class="state bad">Import stopped: ${esc(e.message)}</span>`;
+      btn.disabled = false;
+      $("#chk-pulled").disabled = false;
+    }
+  }
+
+  // ---------- reviewer: variance ----------
+  function varianceModel() {
+    const snap = new Map(state.snapshot.map((r) => [r.sku, r]));
+    const known = new Set(state.skus.map((s) => s.sku));
+    const rows = [], uncounted = [], missingFromExport = [];
+    for (const s of state.skus) {
+      const latest = latestComplete(s.sku);
+      const sc = snap.get(s.sku);
+      if (!sc) missingFromExport.push(s);
+      if (!latest) { uncounted.push(s); continue; }
+      const onHand = sc ? sc.onHand : 0;
+      const counted = latest.full * s.caseQty + latest.loose;
+      const diff = onHand - counted;
+      const history = entriesFor(s.sku).filter(isComplete).sort((a, b) => a.round - b.round);
+      rows.push({
+        s, onHand, counted, diff, latest, history, pending: recountPending(s.sku),
+        cases: diff !== 0 && s.caseQty > 0 && diff % s.caseQty === 0 ? Math.abs(diff / s.caseQty) : 0,
+        name: sc ? sc.name : ""
+      });
+    }
+    const notAssigned = state.snapshot.filter((r) => !known.has(r.sku));
+    rows.sort((a, b) => b.diff - a.diff || (a.s.sku < b.s.sku ? -1 : 1));
+    return { rows, uncounted, missingFromExport, notAssigned };
+  }
+
+  async function renderVariance() {
+    const app = $("#app");
+    if (!state.snapshot || state.snapshotFor !== state.session.id) app.innerHTML = `<p class="muted">Loading variances…</p>`;
+    try {
+      await loadSnapshot();
+    } catch (e) {
+      if (!(e instanceof AuthNeeded)) app.innerHTML = `<p class="state bad">${esc(e.message)}</p>`;
+      return;
+    }
+    if (currentView().name !== "variance") return;
+    if (!state.snapshot.length) {
+      app.innerHTML = `<button class="back" id="btn-back">‹ Home</button>
+        <div class="empty"><h1>No snapshot yet</h1><p>Import the SellerCloud Inventory Comparison export first.</p>
+        <button id="btn-go-import">Import SellerCloud snapshot</button></div>`;
+      $("#btn-back").addEventListener("click", () => go("home"));
+      $("#btn-go-import").addEventListener("click", () => go("import"));
+      return;
+    }
+
+    const m = varianceModel();
+    const off = m.rows.filter((r) => r.diff !== 0);
+    const match = m.rows.filter((r) => r.diff === 0);
+    const higher = off.filter((r) => r.diff > 0).length;
+    const net = off.reduce((t, r) => t + r.diff, 0);
+    const pendingCount = state.skus.filter((s) => recountPending(s.sku)).length;
+    for (const k of [...state.picked]) if (!off.some((r) => r.s.sku === k && !r.pending)) state.picked.delete(k);
+
+    const rowHtmlV = (r) => {
+      const hist = r.history.length > 1 ? `<span class="small">Earlier: ${r.history.slice(0, -1).map((h) => `round ${h.round} ${h.full * r.s.caseQty + h.loose}`).join(", ")}</span><br>` : "";
+      const pick = r.pending
+        ? `<span class="tag">Recount pending</span><br><button class="linkish" data-cancel="${esc(r.s.sku)}">Cancel</button>`
+        : `<input type="checkbox" data-pick="${esc(r.s.sku)}" aria-label="Recount ${esc(r.s.sku)}" ${state.picked.has(r.s.sku) ? "checked" : ""}>`;
+      return `
+        <tr class="${r.diff > 0 ? "pos" : r.diff < 0 ? "neg" : ""}">
+          <td class="pick">${r.diff !== 0 ? pick : ""}</td>
+          <td><strong>${esc(r.s.sku)}</strong><br><span class="small">${esc(r.s.area)}, case of ${esc(r.s.caseQty)}</span></td>
+          <td class="num">${r.onHand}</td>
+          <td class="num">${r.counted}</td>
+          <td class="num diff">${r.diff > 0 ? "+" : ""}${r.diff}${r.cases ? `<span class="caselabel">= ${r.cases} case${r.cases > 1 ? "s" : ""}</span>` : ""}</td>
+          <td>${hist}<span class="small">Round ${r.latest.round} by ${esc(r.latest.by || "unknown")}</span>${r.latest.note ? `<br>${esc(r.latest.note)}` : ""}</td>
+        </tr>`;
+    };
+    const head = `<thead><tr><th></th><th>SKU</th><th class="num">SellerCloud</th><th class="num">Counted</th><th class="num">Difference</th><th>Count</th></tr></thead>`;
+
+    app.innerHTML = `
+      <button class="back" id="btn-back">‹ Home</button>
+      <div class="area-head">
+        <div>
+          <h1>Variances</h1>
+          <div class="muted">SellerCloud on hand minus counted. Yellow means SellerCloud is higher, red means it's lower. Updates every 20 seconds.</div>
+        </div>
+        ${state.session.status === "Counting" ? `<button class="secondary" id="btn-review">Mark counting finished</button>` : ""}
+      </div>
+      <div class="summary">
+        <div><strong>${off.length}</strong>SKU${off.length === 1 ? "" : "s"} differ</div>
+        <div><strong>${higher} / ${off.length - higher}</strong>higher / lower in SellerCloud</div>
+        <div><strong>${net > 0 ? "+" : ""}${net}</strong>net units</div>
+        <div><strong>${match.length}</strong>match</div>
+        ${m.uncounted.length ? `<div><strong>${m.uncounted.length}</strong>not counted yet</div>` : ""}
+        ${pendingCount ? `<div><strong>${pendingCount}</strong>waiting for recount</div>` : ""}
+      </div>
+      ${m.uncounted.length ? `<p class="state warn">${m.uncounted.length} SKU${m.uncounted.length > 1 ? "s haven't" : " hasn't"} been counted yet: ${AREAS.map((a) => { const n = m.uncounted.filter((s) => s.area === a).length; return n ? `${esc(a)} ${n}` : ""; }).filter(Boolean).join(", ")}.</p>` : ""}
+      ${off.length ? `<div class="table-wrap"><table class="var">${head}<tbody>${off.map(rowHtmlV).join("")}</tbody></table></div>`
+        : `<div class="empty" style="margin-bottom:20px"><p>No variances among the SKUs counted so far.</p></div>`}
+      <div class="sticky-act" id="act" ${state.picked.size ? "" : "hidden"}>
+        <span id="act-label">${state.picked.size} selected</span>
+        <button id="btn-send">Send to recount</button>
+      </div>
+      ${m.notAssigned.length ? `<details class="section" open><summary>In the SellerCloud export but not assigned to an area (${m.notAssigned.length})</summary>
+        <div class="table-wrap"><table class="var"><thead><tr><th>SKU</th><th>Product</th><th class="num">SellerCloud on hand</th></tr></thead><tbody>
+        ${m.notAssigned.map((r) => `<tr><td><strong>${esc(r.sku)}</strong></td><td>${esc(r.name)}</td><td class="num">${r.onHand}</td></tr>`).join("")}
+        </tbody></table></div><p class="small">Add these to Count SKUs with an area if they should be counted.</p></details>` : ""}
+      ${m.missingFromExport.length ? `<details class="section" open><summary>In Count SKUs but missing from the SellerCloud export (${m.missingFromExport.length})</summary>
+        <p class="small">Treated as 0 on hand. A SKU usually goes missing when it was renamed or removed in SellerCloud.</p>
+        <p>${m.missingFromExport.map((s) => `${esc(s.sku)} (${esc(s.area)})`).join("<br>")}</p></details>` : ""}
+      ${match.length ? `<details class="section"><summary>Matching SKUs (${match.length})</summary>
+        <div class="table-wrap"><table class="var">${head}<tbody>${match.map(rowHtmlV).join("")}</tbody></table></div></details>` : ""}`;
+
+    $("#btn-back").addEventListener("click", () => go("home"));
+    const br = $("#btn-review");
+    if (br) br.addEventListener("click", async () => {
+      br.disabled = true;
+      try { await setStatus("Review"); toast("Session moved to review"); render(); }
+      catch (e) { br.disabled = false; if (!(e instanceof AuthNeeded)) toast(e.message); }
+    });
+    app.querySelectorAll("[data-pick]").forEach((cb) => cb.addEventListener("change", () => {
+      if (cb.checked) state.picked.add(cb.dataset.pick); else state.picked.delete(cb.dataset.pick);
+      $("#act").hidden = !state.picked.size;
+      $("#act-label").textContent = `${state.picked.size} selected`;
+    }));
+    app.querySelectorAll("[data-cancel]").forEach((b) => b.addEventListener("click", () => cancelRecount(b.dataset.cancel, b)));
+    $("#btn-send").addEventListener("click", sendRecounts);
+
+    state.pollTimer = setInterval(async () => {
+      if (document.hidden || currentView().name !== "variance") return;
+      if (document.activeElement && document.activeElement.closest && document.activeElement.closest("#app button:disabled")) return;
+      try { await loadSession(); await loadEntries(); } catch (e) { return; }
+      if (currentView().name === "variance") { const y = window.scrollY; await renderVariance(); window.scrollTo(0, y); }
+    }, 20000);
+  }
+
+  async function sendRecounts() {
+    const btn = $("#btn-send");
+    btn.disabled = true;
+    const picks = [...state.picked];
+    try {
+      await loadEntries();
+      for (const sku of picks) {
+        if (recountPending(sku)) continue;
+        const s = state.skus.find((x) => x.sku === sku);
+        const created = await graph("POST", `${listPath("entries")}/items`, {
+          fields: { Title: sku, SessionId: state.session.id, Area: s.area, CaseQty: s.caseQty, Round: maxRound(sku) + 1 }
+        });
+        state.entries.push({ itemId: String(created.id), sku, round: maxRound(sku) + 1, full: null, loose: null, total: null, note: "", by: "", at: "" });
+      }
+      if (state.session.status === "Counting") await setStatus("Review");
+      state.picked.clear();
+      toast(`${picks.length} SKU${picks.length > 1 ? "s" : ""} sent to recount`);
+      render();
+    } catch (e) {
+      btn.disabled = false;
+      if (!(e instanceof AuthNeeded)) toast(`Couldn't send to recount: ${e.message}`);
+      await refreshQuietly();
+      render();
+    }
+  }
+
+  async function cancelRecount(sku, btn) {
+    btn.disabled = true;
+    try {
+      await loadEntries();
+      const req = entriesFor(sku).find((e) => e.round > 1 && !isComplete(e));
+      if (req) await graph("DELETE", `${listPath("entries")}/items/${req.itemId}`);
+      await loadEntries();
+      toast(`Recount for ${sku} cancelled`);
+      render();
+    } catch (e) {
+      btn.disabled = false;
+      if (!(e instanceof AuthNeeded)) toast(`Couldn't cancel: ${e.message}`);
+    }
   }
 
   // A row's inputs and saving logic are shared by the area and recount screens.
@@ -703,11 +1062,14 @@
       await loadEntries();
       const n = state.entries.length;
       const label = sessionLabel(state.session.title);
-      if (!confirm(`Delete the ${label} session and its ${n} count entr${n === 1 ? "y" : "ies"}? This can't be undone.`)) {
+      if (!confirm(`Delete the ${label} session, its ${n} count entr${n === 1 ? "y" : "ies"} and its SellerCloud snapshot? This can't be undone.`)) {
         btn.disabled = false;
         return;
       }
       await pool(state.entries, 4, (e) => graph("DELETE", `${listPath("entries")}/items/${e.itemId}`));
+      await loadSnapshot(true);
+      await pool(state.snapshot || [], 6, (r) => graph("DELETE", `${listPath("snapshot")}/items/${r.itemId}`));
+      state.snapshot = null; state.snapshotFor = null;
       await graph("DELETE", `${listPath("sessions")}/items/${state.session.id}`);
       await loadSession();
       await loadEntries();
