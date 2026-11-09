@@ -2,24 +2,765 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Cycle count · AFU</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@2.38.3/lib/msal-browser.min.js"></script>
 <style>
-  :root { --paper: #f7f9fc; --ink: #1b2230; --muted: #5a6478; color-scheme: light; }
-  @media (prefers-color-scheme: dark) {
-    :root { --paper: #12161e; --ink: #e6eaf2; --muted: #9aa4b8; color-scheme: dark; }
+  :root {
+    --paper: #f7f9fc;
+    --surface: #ffffff;
+    --ink: #1b2230;
+    --muted: #5a6478;
+    --rule: #d8dee9;
+    --blue: #2b5cad;
+    --blue-ink: #ffffff;
+    --pass: #2e7d4f;
+    --fail: #b3261e;
+    --warn: #8a5a00;
+    --warn-soft: #fdf3dc;
+    color-scheme: light;
   }
-  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--paper); color: var(--ink);
-         font: 17px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  main { padding: 24px; text-align: center; }
-  h1 { margin: 0 0 8px; font-size: 1.6rem; }
-  p { margin: 0; color: var(--muted); }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #12161e;
+      --surface: #1a202b;
+      --ink: #e6eaf2;
+      --muted: #9aa4b8;
+      --rule: #2e3646;
+      --blue: #6f9be6;
+      --blue-ink: #0d1422;
+      --pass: #6cc58f;
+      --fail: #f08a80;
+      --warn: #e6b450;
+      --warn-soft: #2f2817;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--paper); color: var(--ink);
+    font: 18px/1.5 "Atkinson Hyperlegible", system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-variant-numeric: tabular-nums;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    -webkit-text-size-adjust: 100%;
+  }
+  .bar {
+    position: sticky; top: 0; z-index: 5;
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    padding: calc(12px + env(safe-area-inset-top, 0px)) 24px 12px;
+    background: var(--blue); color: var(--blue-ink);
+  }
+  .bar .brand { font-weight: 700; font-size: 1.15rem; }
+  .bar .session { flex: 1; min-width: 0; }
+  .bar .who { font-size: 0.9rem; opacity: 0.9; }
+  .bar button { background: transparent; color: inherit; border: 1px solid currentColor; padding: 4px 10px; font-size: 0.85rem; min-height: 0; }
+  main { max-width: 1040px; margin: 0 auto; padding: 24px; }
+  h1 { font-size: 1.7rem; line-height: 1.2; margin: 0 0 6px; }
+  h2 { font-size: 1.2rem; margin: 0 0 8px; }
+  p { margin: 0 0 12px; max-width: 64ch; }
+  .muted { color: var(--muted); }
+  button {
+    font: inherit; font-weight: 700;
+    background: var(--blue); color: var(--blue-ink);
+    border: 0; border-radius: 6px; padding: 12px 20px; cursor: pointer;
+    min-height: 44px;
+  }
+  button.secondary { background: transparent; color: var(--blue); border: 2px solid var(--blue); }
+  button.danger { background: transparent; color: var(--fail); border: 2px solid var(--fail); }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  button:focus-visible, input:focus-visible { outline: 3px solid var(--blue); outline-offset: 2px; }
+
+  .progress { height: 8px; background: var(--rule); border-radius: 4px; overflow: hidden; }
+  .progress > span { display: block; height: 100%; background: var(--blue); }
+  .progress.full > span { background: var(--pass); }
+
+  .overall { margin: 4px 0 28px; }
+  .overall .figure { font-size: 1.05rem; margin-bottom: 8px; }
+
+  .areas { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
+  .area-btn {
+    display: block; width: 100%; text-align: left;
+    background: var(--surface); color: var(--ink);
+    border: 2px solid var(--rule); border-radius: 10px;
+    padding: 18px 20px; font-weight: 400;
+  }
+  .area-btn .name { font-size: 1.25rem; font-weight: 700; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .area-btn .count { color: var(--muted); margin: 4px 0 12px; }
+  .area-btn.complete { border-color: var(--pass); }
+  .area-btn.complete .name::after { content: "✓"; color: var(--pass); }
+
+  .recount-card {
+    display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+    background: var(--warn-soft); border: 2px solid var(--warn); border-radius: 10px;
+    padding: 16px 20px; margin-bottom: 24px;
+  }
+  .recount-card strong { color: var(--warn); }
+
+  .reviewer { margin-top: 40px; padding-top: 20px; border-top: 1px solid var(--rule); }
+  .reviewer h2 { font-size: 1rem; color: var(--muted); }
+
+  .empty { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 28px; }
+
+  .area-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
+  .back { background: transparent; color: var(--blue); padding: 8px 0; margin-bottom: 8px; min-height: 0; }
+  .tools { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .search {
+    font: inherit; padding: 10px 14px; border: 2px solid var(--rule); border-radius: 6px;
+    background: var(--surface); color: var(--ink); width: 220px; min-height: 44px;
+  }
+  .toggle { display: flex; align-items: center; gap: 8px; font-size: 0.95rem; cursor: pointer; }
+  .toggle input { width: 22px; height: 22px; }
+
+  .rows { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; overflow: hidden; }
+  .row-head, .row {
+    display: grid;
+    grid-template-columns: minmax(150px, 1.4fr) 110px 110px 90px minmax(120px, 1fr);
+    gap: 12px; align-items: center; padding: 10px 16px;
+  }
+  .row-head { font-size: 0.85rem; color: var(--muted); font-weight: 700; border-bottom: 1px solid var(--rule); }
+  .row { border-bottom: 1px solid var(--rule); border-left: 5px solid transparent; }
+  .row:last-child { border-bottom: 0; }
+  .row.counted { border-left-color: var(--pass); }
+  .row.partial { border-left-color: var(--warn); background: var(--warn-soft); }
+  .row.locked { opacity: 0.75; }
+  .sku { font-weight: 700; }
+  .caseinfo { font-size: 0.85rem; color: var(--muted); }
+  .row input.qty {
+    font: inherit; font-size: 1.15rem; text-align: center;
+    width: 100%; padding: 8px; min-height: 48px;
+    border: 2px solid var(--rule); border-radius: 6px; background: var(--paper); color: var(--ink);
+  }
+  .row input.qty:focus { border-color: var(--blue); outline: none; }
+  .total { font-size: 1.15rem; font-weight: 700; text-align: right; }
+  .total.pending { color: var(--muted); font-weight: 400; }
+  .state { font-size: 0.9rem; }
+  .state.ok { color: var(--pass); font-weight: 700; }
+  .state.bad { color: var(--fail); font-weight: 700; }
+  .state.warn { color: var(--warn); font-weight: 700; }
+  .note-line { grid-column: 1 / -1; display: none; }
+  .row.counted .note-line, .row.has-note .note-line { display: block; }
+  .note-line input {
+    font: inherit; font-size: 0.95rem; width: 100%; padding: 8px 12px;
+    border: 1px dashed var(--rule); border-radius: 6px; background: transparent; color: var(--ink);
+  }
+  .note-line input:focus { border-style: solid; border-color: var(--blue); outline: none; }
+
+  .center { min-height: 60vh; display: grid; place-items: center; text-align: center; }
+  .center .box { max-width: 460px; }
+
+  #toast {
+    position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%);
+    background: var(--ink); color: var(--paper); padding: 12px 20px; border-radius: 8px;
+    max-width: calc(100% - 48px); display: none; z-index: 10;
+  }
+  #toast.show { display: block; }
+  #authbar { display: none; background: var(--warn-soft); border-bottom: 2px solid var(--warn); padding: 12px 24px; }
+  #authbar.show { display: flex; gap: 16px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+
+  @media (max-width: 760px) {
+    main { padding: 16px; }
+    .row-head { display: none; }
+    .row { grid-template-columns: 1fr 1fr; }
+    .row .skucell { grid-column: 1 / -1; }
+    .row .total { text-align: left; }
+    .search { width: 100%; }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .progress > span { transition: width 0.3s ease; }
+  }
 </style>
 </head>
 <body>
-<main>
-  <h1>Cycle count</h1>
-  <p>The counting app isn't live yet.</p>
-</main>
+<header class="bar">
+  <span class="brand">Cycle count</span>
+  <span class="session" id="session-label"></span>
+  <span class="who" id="who"></span>
+  <button id="btn-signout" hidden>Sign out</button>
+</header>
+<div id="authbar" role="alert">
+  <span>Your sign-in has expired. Saved counts are safe.</span>
+  <button id="btn-reauth">Sign in again</button>
+</div>
+<main id="app"><div class="center"><div class="box"><p class="muted">Loading…</p></div></div></main>
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  const CONFIG = {
+    clientId: "6dfb99f3-6820-481b-9f92-c8100b15c0a1",
+    tenantId: "5599de1b-8f99-4d64-8f98-59493afb33f5",
+    redirectUri: "https://jdhite73.github.io/afu-cyclecount/",
+    siteHost: "airfiltersunlimited.sharepoint.com",
+    sitePath: "/sites/Inventory",
+    scopes: ["Sites.ReadWrite.All", "User.Read"]
+  };
+  const AREAS = ["Downstairs", "Upstairs 1", "Upstairs 2", "Upstairs 4", "Upstairs M11 M13", "Back Room"];
+  const LIST = { skus: "Count SKUs", sessions: "Count Sessions", entries: "Count Entries", snapshot: "SellerCloud Snapshot" };
+  const ENTRY_FIELDS = "Title,SessionId,Area,CaseQty,FullCases,LooseFilters,Total,Round,CountedBy,CountedAt,Note";
+
+  const state = {
+    account: null, siteId: null, lists: {}, isReviewer: false,
+    skus: [], session: null, extraOpenSessions: 0, entries: [], recountDone: []
+  };
+
+  // ---------- helpers ----------
+  const $ = (sel, root = document) => root.querySelector(sel);
+  const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const isNum = (v) => typeof v === "number" && !isNaN(v);
+  const pad = (n) => String(n).padStart(2, "0");
+  const todayKey = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+  function sessionLabel(title) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(title || "");
+    if (!m) return title || "";
+    return new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
+  }
+  let toastTimer;
+  function toast(msg) {
+    const t = $("#toast");
+    t.textContent = msg;
+    t.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => t.classList.remove("show"), 4000);
+  }
+
+  // ---------- auth ----------
+  const msalApp = new msal.PublicClientApplication({
+    auth: {
+      clientId: CONFIG.clientId,
+      authority: `https://login.microsoftonline.com/${CONFIG.tenantId}`,
+      redirectUri: CONFIG.redirectUri
+    },
+    cache: { cacheLocation: "localStorage" }
+  });
+
+  class AuthNeeded extends Error {}
+
+  async function getToken() {
+    try {
+      return (await msalApp.acquireTokenSilent({ scopes: CONFIG.scopes, account: state.account })).accessToken;
+    } catch (e) {
+      if (e instanceof msal.InteractionRequiredAuthError) {
+        $("#authbar").classList.add("show");
+        throw new AuthNeeded("Sign-in expired");
+      }
+      throw e;
+    }
+  }
+
+  function signIn() { msalApp.loginRedirect({ scopes: CONFIG.scopes, prompt: "select_account" }); }
+  $("#btn-reauth").addEventListener("click", signIn);
+  $("#btn-signout").addEventListener("click", () => {
+    if (confirm("Sign out of the cycle count app on this device?")) {
+      msalApp.logoutRedirect({ account: state.account, postLogoutRedirectUri: CONFIG.redirectUri });
+    }
+  });
+
+  // ---------- Graph ----------
+  async function graph(method, path, body, headers) {
+    const url = path.startsWith("https://") ? path : `https://graph.microsoft.com/v1.0${path}`;
+    for (let attempt = 1; attempt <= 6; attempt++) {
+      const token = await getToken();
+      const res = await fetch(url, {
+        method,
+        headers: Object.assign({ Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, headers || {}),
+        body: body ? JSON.stringify(body) : undefined
+      });
+      if (res.status === 429 || res.status === 503 || res.status === 504) {
+        await sleep((parseInt(res.headers.get("Retry-After"), 10) || attempt * 2) * 1000);
+        continue;
+      }
+      if (res.status === 204) return null;
+      const json = await res.json().catch(() => null);
+      if (!res.ok) {
+        const err = new Error(json && json.error ? json.error.message : `${res.status} ${res.statusText}`);
+        err.status = res.status;
+        throw err;
+      }
+      return json;
+    }
+    throw new Error("SharePoint is busy. Try again in a minute.");
+  }
+
+  async function graphAll(path, headers) {
+    let out = [], next = path;
+    while (next) {
+      const page = await graph("GET", next, null, headers);
+      out = out.concat(page.value || []);
+      next = page["@odata.nextLink"] || null;
+    }
+    return out;
+  }
+
+  async function pool(items, size, fn) {
+    let i = 0;
+    await Promise.all(Array.from({ length: Math.min(size, items.length) }, async () => {
+      while (i < items.length) { const idx = i++; await fn(items[idx]); }
+    }));
+  }
+
+  const listPath = (key) => `/sites/${state.siteId}/lists/${state.lists[key]}`;
+
+  // ---------- data ----------
+  async function loadBasics() {
+    const site = await graph("GET", `/sites/${CONFIG.siteHost}:${CONFIG.sitePath}?$select=id`);
+    state.siteId = site.id;
+    const lists = await graphAll(`/sites/${state.siteId}/lists?$select=id,displayName`);
+    for (const [key, name] of Object.entries(LIST)) {
+      const l = lists.find((x) => x.displayName === name);
+      if (l) state.lists[key] = l.id;
+    }
+    // Counters can't see the Snapshot list, so its visibility tells us who is a reviewer.
+    state.isReviewer = !!state.lists.snapshot;
+    for (const key of ["skus", "sessions", "entries"]) {
+      if (!state.lists[key]) throw new Error(`Can't find the ${LIST[key]} list. Check that you're a member of the Inventory team.`);
+    }
+    const items = await graphAll(`${listPath("skus")}/items?$expand=fields($select=Title,Area,CaseQty,Active)&$top=500`);
+    state.skus = items
+      .map((it) => ({ sku: it.fields.Title, area: it.fields.Area, caseQty: it.fields.CaseQty, active: it.fields.Active }))
+      .filter((s) => s.active !== false && s.sku)
+      .sort((a, b) => (a.sku < b.sku ? -1 : a.sku > b.sku ? 1 : 0));
+  }
+
+  async function loadSession() {
+    const items = await graphAll(`${listPath("sessions")}/items?$expand=fields($select=Title,Status)&$top=500`);
+    const open = items
+      .map((it) => ({ id: Number(it.id), title: it.fields.Title, status: it.fields.Status }))
+      .filter((s) => s.status !== "Finalized")
+      .sort((a, b) => b.id - a.id);
+    state.session = open[0] || null;
+    state.extraOpenSessions = Math.max(0, open.length - 1);
+  }
+
+  async function loadEntries() {
+    if (!state.session) { state.entries = []; return; }
+    const items = await graphAll(
+      `${listPath("entries")}/items?$expand=fields($select=${ENTRY_FIELDS})&$filter=fields/SessionId eq ${state.session.id}&$top=500`,
+      { Prefer: "HonorNonIndexedQueriesWarningMayFailRandomly" }
+    );
+    state.entries = items.map((it) => ({
+      itemId: String(it.id), sku: it.fields.Title, round: Number(it.fields.Round) || 1,
+      full: isNum(it.fields.FullCases) ? it.fields.FullCases : null,
+      loose: isNum(it.fields.LooseFilters) ? it.fields.LooseFilters : null,
+      total: isNum(it.fields.Total) ? it.fields.Total : null,
+      note: it.fields.Note || "", by: it.fields.CountedBy || "", at: it.fields.CountedAt || ""
+    }));
+  }
+
+  const isComplete = (e) => !!e && e.full !== null && e.loose !== null;
+  const entriesFor = (sku) => state.entries.filter((e) => e.sku === sku);
+  const firstRound = (sku) => entriesFor(sku).find((e) => e.round === 1) || null;
+  const hasRecountRound = (sku) => entriesFor(sku).some((e) => e.round > 1);
+  const isCounted = (sku) => entriesFor(sku).some(isComplete);
+  const pendingRecounts = () => state.entries
+    .filter((e) => e.round > 1 && !isComplete(e))
+    .sort((a, b) => (a.sku < b.sku ? -1 : 1));
+
+  function areaStats(area) {
+    const list = state.skus.filter((s) => s.area === area);
+    return { total: list.length, counted: list.filter((s) => isCounted(s.sku)).length };
+  }
+
+  // ---------- routing ----------
+  function go(view) {
+    if (location.hash !== `#${view}`) location.hash = view;
+    else render();
+  }
+  window.addEventListener("hashchange", async () => {
+    await refreshQuietly();
+    render();
+  });
+  function currentView() {
+    const h = decodeURIComponent(location.hash.slice(1));
+    if (h === "recount") return { name: "recount" };
+    if (h.startsWith("area=")) {
+      const area = h.slice(5);
+      if (AREAS.includes(area)) return { name: "area", area };
+    }
+    return { name: "home" };
+  }
+
+  async function refreshQuietly() {
+    try { await loadSession(); await loadEntries(); } catch (e) { if (!(e instanceof AuthNeeded)) toast(e.message); }
+  }
+
+  // ---------- rendering ----------
+  function renderHeader() {
+    $("#who").textContent = state.account ? state.account.name || state.account.username : "";
+    $("#btn-signout").hidden = !state.account;
+    $("#session-label").textContent = state.session ? `${sessionLabel(state.session.title)} count` : "";
+  }
+
+  function render() {
+    renderHeader();
+    const v = currentView();
+    if (!state.session && v.name !== "home") { history.replaceState(null, "", "#home"); return renderHome(); }
+    if (v.name === "area") return renderArea(v.area);
+    if (v.name === "recount") return renderRecount();
+    return renderHome();
+  }
+
+  function renderHome() {
+    const app = $("#app");
+    if (!state.session) {
+      app.innerHTML = `
+        <div class="empty">
+          <h1>No count is open</h1>
+          ${state.isReviewer
+            ? `<p>Open a session once the morning's shipments are printed and pulled. Counting can start straight away.</p>
+               <button id="btn-open">Open count session for ${esc(sessionLabel(todayKey()))}</button>`
+            : `<p>Counting starts once a reviewer opens this week's session. Tap below to check again.</p>
+               <button class="secondary" id="btn-refresh">Check again</button>`}
+        </div>`;
+      const open = $("#btn-open");
+      if (open) open.addEventListener("click", openSession);
+      const refresh = $("#btn-refresh");
+      if (refresh) refresh.addEventListener("click", async () => { await refreshQuietly(); render(); });
+      return;
+    }
+
+    const totalSkus = state.skus.length;
+    const counted = state.skus.filter((s) => isCounted(s.sku)).length;
+    const pct = totalSkus ? Math.round((counted / totalSkus) * 100) : 0;
+    const recounts = pendingRecounts();
+
+    const areaCards = AREAS.map((a) => {
+      const st = areaStats(a);
+      const p = st.total ? Math.round((st.counted / st.total) * 100) : 0;
+      const done = st.total > 0 && st.counted === st.total;
+      return `
+        <button class="area-btn ${done ? "complete" : ""}" data-area="${esc(a)}">
+          <span class="name">${esc(a)}</span>
+          <div class="count">${st.counted} of ${st.total} counted</div>
+          <div class="progress ${done ? "full" : ""}"><span style="width:${p}%"></span></div>
+        </button>`;
+    }).join("");
+
+    app.innerHTML = `
+      <h1>${totalSkus && counted === totalSkus ? "Everything is counted" : "Choose an area to count"}</h1>
+      <div class="overall">
+        <div class="figure">${counted} of ${totalSkus} SKUs counted</div>
+        <div class="progress ${totalSkus && counted === totalSkus ? "full" : ""}"><span style="width:${pct}%"></span></div>
+      </div>
+      ${recounts.length ? `
+        <div class="recount-card">
+          <span><strong>${recounts.length} SKU${recounts.length > 1 ? "s" : ""} to recount.</strong> Count them again from scratch.</span>
+          <button id="btn-recount">Start recount</button>
+        </div>` : ""}
+      <div class="areas">${areaCards}</div>
+      ${state.isReviewer ? `
+        <section class="reviewer">
+          <h2>Reviewer</h2>
+          ${state.extraOpenSessions > 0 ? `<p class="state warn">${state.extraOpenSessions} older session${state.extraOpenSessions > 1 ? "s are" : " is"} also still open. Only the newest one is shown.</p>` : ""}
+          <p class="muted">Session status: ${esc(state.session.status || "Counting")}. Variance review, recount requests and Finalize arrive in the next build step.</p>
+          <button class="danger" id="btn-discard">Discard this session</button>
+        </section>` : ""}`;
+
+    app.querySelectorAll(".area-btn").forEach((b) => b.addEventListener("click", () => go(`area=${encodeURIComponent(b.dataset.area)}`)));
+    const rc = $("#btn-recount");
+    if (rc) rc.addEventListener("click", () => { state.recountDone = []; go("recount"); });
+    const dz = $("#btn-discard");
+    if (dz) dz.addEventListener("click", discardSession);
+  }
+
+  // A row's inputs and saving logic are shared by the area and recount screens.
+  function rowHtml({ key, sku, caseQty, area, entry, locked, lockedText, showArea }) {
+    const full = entry && entry.full !== null ? entry.full : "";
+    const loose = entry && entry.loose !== null ? entry.loose : "";
+    const done = isComplete(entry);
+    const total = done ? entry.full * caseQty + entry.loose : "";
+    return `
+      <div class="row ${done ? "counted" : ""} ${locked ? "locked" : ""} ${entry && entry.note ? "has-note" : ""}" data-key="${esc(key)}">
+        <div class="skucell">
+          <div class="sku">${esc(sku)}</div>
+          <div class="caseinfo">Case of ${esc(caseQty)}${showArea ? `, ${esc(area)}` : ""}</div>
+        </div>
+        <input class="qty" data-f="full" inputmode="numeric" pattern="[0-9]*" autocomplete="off" aria-label="Full cases for ${esc(sku)}" value="${esc(full)}" ${locked ? "disabled" : ""}>
+        <input class="qty" data-f="loose" inputmode="numeric" pattern="[0-9]*" autocomplete="off" aria-label="Loose filters for ${esc(sku)}" value="${esc(loose)}" ${locked ? "disabled" : ""}>
+        <div class="total ${done ? "" : "pending"}">${done ? total : "–"}</div>
+        <div class="state ${locked ? "" : done ? "ok" : ""}">${locked ? esc(lockedText) : done ? "Saved" : "Not counted"}</div>
+        <div class="note-line"><input data-f="note" placeholder="Add a note, e.g. 3 cases in Back Room" value="${esc(entry ? entry.note : "")}" aria-label="Note for ${esc(sku)}" ${locked ? "disabled" : ""}></div>
+      </div>`;
+  }
+
+  const rowHead = `<div class="row-head"><span>SKU</span><span>Full cases</span><span>Loose filters</span><span style="text-align:right">Total</span><span></span></div>`;
+
+  function renderArea(area) {
+    const skus = state.skus.filter((s) => s.area === area);
+    const st = areaStats(area);
+    const rows = skus.map((s) => rowHtml({
+      key: s.sku, sku: s.sku, caseQty: s.caseQty, area, entry: firstRound(s.sku),
+      locked: hasRecountRound(s.sku), lockedText: "On the recount list"
+    })).join("");
+
+    $("#app").innerHTML = `
+      <button class="back" id="btn-back">‹ All areas</button>
+      <div class="area-head">
+        <div>
+          <h1>${esc(area)}</h1>
+          <div class="muted" id="area-progress">${st.counted} of ${st.total} counted</div>
+        </div>
+        <div class="tools">
+          <input class="search" id="search" placeholder="Find a SKU" autocomplete="off" autocapitalize="characters">
+          <label class="toggle"><input type="checkbox" id="only-open"> Uncounted only</label>
+        </div>
+      </div>
+      <div class="rows" id="rows">${rowHead}${rows}</div>
+      <p class="muted" style="margin-top:16px">Type 0 when there are none. A SKU counts as done once both boxes are filled.</p>`;
+
+    $("#btn-back").addEventListener("click", () => go("home"));
+    const filter = () => {
+      const q = $("#search").value.trim().toUpperCase();
+      const only = $("#only-open").checked;
+      document.querySelectorAll("#rows .row").forEach((r) => {
+        const matches = !q || r.dataset.key.toUpperCase().includes(q);
+        const open = !r.classList.contains("counted");
+        r.style.display = matches && (!only || open) ? "" : "none";
+      });
+    };
+    $("#search").addEventListener("input", filter);
+    $("#only-open").addEventListener("change", filter);
+
+    wireRows({
+      round: 1,
+      lookup: (sku) => skus.find((s) => s.sku === sku),
+      entryFor: (sku) => firstRound(sku),
+      onChange: () => {
+        const s2 = areaStats(area);
+        const el = $("#area-progress");
+        if (el) el.textContent = `${s2.counted} of ${s2.total} counted`;
+      }
+    });
+  }
+
+  function renderRecount() {
+    const ids = [...new Set([...pendingRecounts().map((e) => e.itemId), ...state.recountDone])];
+    const rows = ids.map((id) => {
+      const e = state.entries.find((x) => x.itemId === id);
+      if (!e) return "";
+      const s = state.skus.find((x) => x.sku === e.sku) || { caseQty: 0, area: "" };
+      return rowHtml({ key: e.itemId, sku: e.sku, caseQty: s.caseQty, area: s.area, entry: e, showArea: true });
+    }).join("");
+
+    $("#app").innerHTML = `
+      <button class="back" id="btn-back">‹ All areas</button>
+      <h1>Recount</h1>
+      <p class="muted">Count each of these again from scratch. Earlier counts aren't shown on purpose.</p>
+      ${ids.length ? `<div class="rows" id="rows">${rowHead}${rows}</div>` : `<div class="empty"><p>Nothing to recount right now.</p></div>`}`;
+    $("#btn-back").addEventListener("click", () => go("home"));
+
+    wireRows({
+      lookup: (id) => {
+        const e = state.entries.find((x) => x.itemId === id);
+        return e ? state.skus.find((x) => x.sku === e.sku) : null;
+      },
+      entryFor: (id) => state.entries.find((x) => x.itemId === id),
+      onChange: (id) => { if (!state.recountDone.includes(id)) state.recountDone.push(id); }
+    });
+  }
+
+  // ---------- saving ----------
+  const inflight = new Map();
+
+  function wireRows({ round, lookup, entryFor, onChange }) {
+    const rowsEl = $("#rows");
+    if (!rowsEl) return;
+    const inputs = () => Array.from(rowsEl.querySelectorAll("input.qty:not([disabled])")).filter((i) => i.offsetParent !== null);
+
+    rowsEl.addEventListener("input", (ev) => {
+      const inp = ev.target;
+      if (!inp.classList.contains("qty")) return;
+      inp.value = inp.value.replace(/[^0-9]/g, "");
+      updatePreview(inp.closest(".row"), lookup);
+    });
+
+    rowsEl.addEventListener("keydown", (ev) => {
+      if (ev.key !== "Enter" || !ev.target.classList.contains("qty")) return;
+      ev.preventDefault();
+      const all = inputs();
+      const next = all[all.indexOf(ev.target) + 1];
+      if (next) next.focus(); else ev.target.blur();
+    });
+
+    rowsEl.addEventListener("change", (ev) => {
+      const row = ev.target.closest(".row");
+      if (!row) return;
+      const key = row.dataset.key;
+      const job = (inflight.get(key) || Promise.resolve())
+        .then(() => saveRow(row, { round, lookup, entryFor }))
+        .then((saved) => { if (saved && onChange) onChange(key); })
+        .catch(() => {});
+      inflight.set(key, job);
+    });
+  }
+
+  function readRow(row) {
+    const f = row.querySelector('[data-f="full"]').value.trim();
+    const l = row.querySelector('[data-f="loose"]').value.trim();
+    const n = row.querySelector('[data-f="note"]').value.trim();
+    return { full: f === "" ? null : Number(f), loose: l === "" ? null : Number(l), note: n };
+  }
+
+  function setRowState(row, cls, text) {
+    const st = row.querySelector(".state");
+    st.className = `state ${cls}`;
+    st.textContent = text;
+  }
+
+  function updatePreview(row, lookup) {
+    const s = lookup(row.dataset.key);
+    const { full, loose } = readRow(row);
+    const totalEl = row.querySelector(".total");
+    if (full !== null && loose !== null && s) {
+      totalEl.textContent = full * s.caseQty + loose;
+      totalEl.classList.remove("pending");
+    } else {
+      totalEl.textContent = "–";
+      totalEl.classList.add("pending");
+    }
+    row.classList.toggle("partial", (full === null) !== (loose === null));
+  }
+
+  // Returns true when something was written.
+  async function saveRow(row, { round, lookup, entryFor }) {
+    const key = row.dataset.key;
+    const s = lookup(key);
+    if (!s) return false;
+    const { full, loose, note } = readRow(row);
+    const entry = entryFor(key);
+
+    if (full === null || loose === null) {
+      if (full === null && loose === null && !isComplete(entry)) { setRowState(row, "", "Not counted"); return false; }
+      setRowState(row, "warn", "Enter both (0 if none)");
+      return false;
+    }
+    const total = full * s.caseQty + loose;
+    if (entry && entry.full === full && entry.loose === loose && (entry.note || "") === note) {
+      setRowState(row, "ok", "Saved");
+      return false;
+    }
+
+    setRowState(row, "", "Saving…");
+    const me = state.account.username;
+    const now = new Date().toISOString();
+    try {
+      if (entry) {
+        const fields = { FullCases: full, LooseFilters: loose, Total: total, Note: note };
+        if (entry.full !== full || entry.loose !== loose) { fields.CountedBy = me; fields.CountedAt = now; }
+        await graph("PATCH", `${listPath("entries")}/items/${entry.itemId}/fields`, fields);
+        Object.assign(entry, { full, loose, total, note }, fields.CountedBy ? { by: me, at: now } : {});
+      } else {
+        const created = await graph("POST", `${listPath("entries")}/items`, {
+          fields: {
+            Title: s.sku, SessionId: state.session.id, Area: s.area, CaseQty: s.caseQty,
+            FullCases: full, LooseFilters: loose, Total: total, Round: round,
+            CountedBy: me, CountedAt: now, Note: note
+          }
+        });
+        state.entries.push({ itemId: String(created.id), sku: s.sku, round, full, loose, total, note, by: me, at: now });
+      }
+      row.classList.add("counted");
+      row.classList.remove("partial");
+      setRowState(row, "ok", "Saved");
+      return true;
+    } catch (e) {
+      if (e instanceof AuthNeeded) { setRowState(row, "bad", "Not saved: sign in again"); throw e; }
+      setRowState(row, "bad", "Not saved. Edit to retry");
+      toast(`Couldn't save ${s.sku}: ${e.message}`);
+      throw e;
+    }
+  }
+
+  // ---------- reviewer actions ----------
+  async function openSession() {
+    const btn = $("#btn-open");
+    btn.disabled = true;
+    try {
+      await loadSession();
+      if (!state.session) {
+        await graph("POST", `${listPath("sessions")}/items`, { fields: { Title: todayKey(), Status: "Counting" } });
+        await loadSession();
+      }
+      await loadEntries();
+      toast("Count session opened");
+      render();
+    } catch (e) {
+      btn.disabled = false;
+      if (!(e instanceof AuthNeeded)) toast(`Couldn't open a session: ${e.message}`);
+    }
+  }
+
+  async function discardSession() {
+    const btn = $("#btn-discard");
+    btn.disabled = true;
+    try {
+      await loadEntries();
+      const n = state.entries.length;
+      const label = sessionLabel(state.session.title);
+      if (!confirm(`Delete the ${label} session and its ${n} count entr${n === 1 ? "y" : "ies"}? This can't be undone.`)) {
+        btn.disabled = false;
+        return;
+      }
+      await pool(state.entries, 4, (e) => graph("DELETE", `${listPath("entries")}/items/${e.itemId}`));
+      await graph("DELETE", `${listPath("sessions")}/items/${state.session.id}`);
+      await loadSession();
+      await loadEntries();
+      toast("Session discarded");
+      go("home");
+    } catch (e) {
+      btn.disabled = false;
+      if (!(e instanceof AuthNeeded)) toast(`Couldn't discard: ${e.message}. Some entries may already be deleted; try again.`);
+    }
+  }
+
+  // ---------- start ----------
+  function renderSignIn(message) {
+    renderHeader();
+    $("#app").innerHTML = `
+      <div class="center"><div class="box">
+        <h1>Cycle count</h1>
+        <p class="muted">${esc(message || "Sign in with your work account to start counting.")}</p>
+        <button id="btn-signin">Sign in</button>
+      </div></div>`;
+    $("#btn-signin").addEventListener("click", signIn);
+  }
+
+  function renderError(message) {
+    $("#app").innerHTML = `
+      <div class="center"><div class="box">
+        <h1>Can't load the count</h1>
+        <p>${esc(message)}</p>
+        <button id="btn-retry">Try again</button>
+      </div></div>`;
+    $("#btn-retry").addEventListener("click", () => location.reload());
+  }
+
+  (async function boot() {
+    try {
+      const result = await msalApp.handleRedirectPromise();
+      state.account = (result && result.account) || msalApp.getAllAccounts()[0] || null;
+    } catch (e) {
+      return renderSignIn(`Sign-in didn't finish: ${e.message}`);
+    }
+    if (!state.account) return renderSignIn();
+    msalApp.setActiveAccount(state.account);
+    try {
+      await loadBasics();
+      await loadSession();
+      await loadEntries();
+      render();
+    } catch (e) {
+      if (e instanceof AuthNeeded) return renderSignIn("Your sign-in has expired.");
+      renderError(e.message);
+    }
+  })();
+})();
+</script>
 </body>
 </html>
