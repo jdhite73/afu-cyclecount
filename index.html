@@ -7,9 +7,10 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&display=swap" rel="stylesheet">
-<!-- Kept in this repository so count day never depends on an outside download site. msal-browser 2.38.3, SheetJS 0.18.5. -->
+<!-- Kept in this repository so count day never depends on an outside download site. msal-browser 2.38.3, SheetJS 0.18.5, ExcelJS 4.4.0. -->
 <script src="msal-browser.min.js"></script>
 <script src="xlsx.full.min.js"></script>
+<script src="exceljs.min.js"></script>
 <style>
   :root {
     --paper: #f7f9fc;
@@ -206,6 +207,16 @@
   .confirm { display: flex; gap: 10px; align-items: flex-start; margin: 16px 0; max-width: 64ch; }
   .confirm input { width: 24px; height: 24px; flex: none; margin-top: 2px; }
 
+  .blockers li { margin-bottom: 6px; }
+  .field { display: grid; gap: 6px; margin: 16px 0; max-width: 420px; }
+  .field input { font: inherit; padding: 10px 14px; border: 2px solid var(--rule); border-radius: 6px; background: var(--surface); color: var(--ink); min-height: 44px; }
+  .facts { display: grid; grid-template-columns: max-content 1fr; gap: 6px 20px; margin: 12px 0 20px; }
+  .facts dt { color: var(--muted); }
+  .facts dd { margin: 0; font-weight: 700; }
+  .callout { background: var(--warn-soft); border: 2px solid var(--warn); border-radius: 10px; padding: 16px 20px; margin: 20px 0; max-width: 70ch; }
+  .steps-done li { margin-bottom: 8px; }
+  a.btnlink { display: inline-flex; align-items: center; font-weight: 700; text-decoration: none; background: var(--blue); color: var(--blue-ink); border-radius: 6px; padding: 12px 20px; min-height: 44px; }
+
   @media (max-width: 760px) {
     main { padding: 16px; }
     .row-head { display: none; }
@@ -258,8 +269,11 @@
   const state = {
     account: null, siteId: null, lists: {}, isReviewer: false,
     skus: [], session: null, extraOpenSessions: 0, entries: [], recountDone: [],
-    snapshot: null, snapshotFor: null, pollTimer: null, picked: new Set(), parsedExport: null
+    snapshot: null, snapshotFor: null, pollTimer: null, picked: new Set(), parsedExport: null,
+    lastFinalized: null, historyDrive: null, finalResult: null
   };
+  const WAREHOUSE = "Default Warehouse";
+  const DEFAULT_REASON = "Physical Count";
 
   // ---------- helpers ----------
   const $ = (sel, root = document) => root.querySelector(sel);
@@ -375,6 +389,32 @@
     return out;
   }
 
+  async function graphUpload(path, data) {
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      const token = await getToken();
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 60000);
+      let res;
+      try {
+        res = await fetch(`https://graph.microsoft.com/v1.0${path}`, {
+          method: "PUT",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/octet-stream" },
+          body: data, signal: ctrl.signal
+        });
+      } catch (e) {
+        throw new Error(e.name === "AbortError" ? "SharePoint didn't respond while saving the file." : "Couldn't reach SharePoint to save the file.");
+      } finally { clearTimeout(timer); }
+      if (res.status === 429 || res.status === 503 || res.status === 504) {
+        await sleep((parseInt(res.headers.get("Retry-After"), 10) || attempt * 2) * 1000);
+        continue;
+      }
+      const json = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(json && json.error ? json.error.message : `${res.status} ${res.statusText}`);
+      return json;
+    }
+    throw new Error("SharePoint is busy. Try again in a minute.");
+  }
+
   async function pool(items, size, fn) {
     let i = 0;
     await Promise.all(Array.from({ length: Math.min(size, items.length) }, async () => {
@@ -415,6 +455,10 @@
       .sort((a, b) => b.id - a.id);
     state.session = open[0] || null;
     state.extraOpenSessions = Math.max(0, open.length - 1);
+    state.lastFinalized = items
+      .map((it) => ({ id: Number(it.id), title: it.fields.Title, status: it.fields.Status }))
+      .filter((s) => s.status === "Finalized")
+      .sort((a, b) => b.id - a.id)[0] || null;
   }
 
   async function loadEntries() {
@@ -487,6 +531,8 @@
     if (h === "recount") return { name: "recount" };
     if (h === "variance") return { name: "variance" };
     if (h === "import") return { name: "import" };
+    if (h === "finalize") return { name: "finalize" };
+    if (h === "finalized") return { name: "finalized" };
     if (h.startsWith("area=")) {
       const area = h.slice(5);
       if (AREAS.includes(area)) return { name: "area", area };
@@ -511,7 +557,8 @@
     state.pollTimer = null;
     renderHeader();
     const v = currentView();
-    const reviewerOnly = v.name === "variance" || v.name === "import";
+    const reviewerOnly = ["variance", "import", "finalize", "finalized"].includes(v.name);
+    if (v.name === "finalized" && state.isReviewer && state.finalResult) return renderFinalized();
     if ((!state.session && v.name !== "home") || (reviewerOnly && !state.isReviewer)) {
       history.replaceState(null, "", "#home");
       return renderHome();
@@ -520,6 +567,7 @@
     if (v.name === "recount") return renderRecount();
     if (v.name === "variance") return renderVariance();
     if (v.name === "import") return renderImport();
+    if (v.name === "finalize") return renderFinalize();
     return renderHome();
   }
 
@@ -531,7 +579,8 @@
           <h1>No count is open</h1>
           ${state.isReviewer
             ? `<p>Open a session once the morning's shipments are printed and pulled. Counting can start straight away.</p>
-               <button id="btn-open">Open count session for ${esc(sessionLabel(todayKey()))}</button>`
+               <button id="btn-open">Open count session for ${esc(sessionLabel(todayKey()))}</button>
+               ${state.lastFinalized ? `<p class="muted" style="margin-top:20px">Last finalized count: ${esc(sessionLabel(state.lastFinalized.title))}. Its archive and adjustment file are in the Inventory History library.</p>` : ""}`
             : `<p>Counting starts once a reviewer opens this week's session. Tap below to check again.</p>
                <button class="secondary" id="btn-refresh">Check again</button>`}
         </div>`;
@@ -581,8 +630,8 @@
           <div class="actions">
             <button ${state.session.snapshotAt ? "" : "disabled"} id="btn-variance">Review variances</button>
             <button class="secondary" id="btn-import">${state.session.snapshotAt ? "Re-import snapshot" : "Import SellerCloud snapshot"}</button>
+            <button class="secondary" id="btn-finalize">Finalize…</button>
           </div>
-          <p class="muted">Finalize arrives in the next build step.</p>
           <button class="danger" id="btn-discard">Discard this session</button>
           <div class="muted" id="discard-progress" style="margin-top:12px"></div>
         </section>` : ""}`;
@@ -596,6 +645,8 @@
     if (bv) bv.addEventListener("click", () => go("variance"));
     const bi = $("#btn-import");
     if (bi) bi.addEventListener("click", () => { state.parsedExport = null; go("import"); });
+    const bf = $("#btn-finalize");
+    if (bf) bf.addEventListener("click", () => go("finalize"));
   }
 
   // ---------- reviewer: snapshot import ----------
@@ -773,7 +824,10 @@
           <h1>Variances</h1>
           <div class="muted">SellerCloud on hand minus counted. Yellow means SellerCloud is higher, red means it's lower. Updates every 20 seconds.</div>
         </div>
-        ${state.session.status === "Counting" ? `<button class="secondary" id="btn-review">Mark counting finished</button>` : ""}
+        <div class="tools">
+          ${state.session.status === "Counting" ? `<button class="secondary" id="btn-review">Mark counting finished</button>` : ""}
+          <button id="btn-to-finalize">Finalize…</button>
+        </div>
       </div>
       <div class="summary">
         <div><strong>${off.length}</strong>SKU${off.length === 1 ? "" : "s"} differ</div>
@@ -814,6 +868,7 @@
     }));
     app.querySelectorAll("[data-cancel]").forEach((b) => b.addEventListener("click", () => cancelRecount(b.dataset.cancel, b)));
     $("#btn-send").addEventListener("click", sendRecounts);
+    $("#btn-to-finalize").addEventListener("click", () => go("finalize"));
 
     state.pollTimer = setInterval(async () => {
       if (document.hidden || currentView().name !== "variance") return;
@@ -1070,6 +1125,233 @@
       toast(`Couldn't save ${s.sku}: ${e.message}`);
       throw e;
     }
+  }
+
+  // ---------- reviewer: finalize ----------
+  const fileDate = (title) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(title || ""); return m ? `${m[2]}-${m[3]}-${m[1]}` : todayKey(); };
+  const fileYear = (title) => (/^(\d{4})/.exec(title || "") || [null, String(new Date().getFullYear())])[1];
+
+  function finalizeBlockers(m) {
+    const b = [];
+    if (!state.snapshot || !state.snapshot.length) b.push("The SellerCloud snapshot hasn't been imported.");
+    if (m && m.uncounted.length) b.push(`${m.uncounted.length} SKU${m.uncounted.length > 1 ? "s haven't" : " hasn't"} been counted: ${AREAS.map((a) => { const n = m.uncounted.filter((s) => s.area === a).length; return n ? `${a} ${n}` : ""; }).filter(Boolean).join(", ")}.`);
+    const pending = state.skus.filter((s) => recountPending(s.sku)).length;
+    if (pending) b.push(`${pending} recount${pending > 1 ? "s are" : " is"} still waiting to be entered.`);
+    return b;
+  }
+
+  async function renderFinalize() {
+    const app = $("#app");
+    app.innerHTML = `<p class="muted">Checking the count…</p>`;
+    try { await loadSession(); await loadEntries(); await loadSnapshot(true); }
+    catch (e) { if (!(e instanceof AuthNeeded)) app.innerHTML = `<p class="state bad">${esc(e.message)}</p>`; return; }
+    if (currentView().name !== "finalize") return;
+    if (!state.session) return go("home");
+    const m = state.snapshot.length ? varianceModel() : null;
+    const blockers = finalizeBlockers(m);
+
+    if (blockers.length) {
+      app.innerHTML = `
+        <button class="back" id="btn-back">‹ Variances</button>
+        <h1>Not ready to finalize</h1>
+        <ul class="blockers">${blockers.map((b) => `<li>${esc(b)}</li>`).join("")}</ul>
+        <button class="secondary" id="btn-recheck">Check again</button>`;
+      $("#btn-back").addEventListener("click", () => go(state.snapshot.length ? "variance" : "home"));
+      $("#btn-recheck").addEventListener("click", renderFinalize);
+      return;
+    }
+
+    const off = m.rows.filter((r) => r.diff !== 0);
+    const net = off.reduce((t, r) => t + r.diff, 0);
+    const label = sessionLabel(state.session.title);
+    app.innerHTML = `
+      <button class="back" id="btn-back">‹ Variances</button>
+      <h1>Finalize the ${esc(label)} count</h1>
+      <dl class="facts">
+        <dt>SKUs counted</dt><dd>${m.rows.length}</dd>
+        <dt>SKUs with a difference</dt><dd>${off.length} (${off.filter((r) => r.diff > 0).length} higher, ${off.filter((r) => r.diff < 0).length} lower in SellerCloud)</dd>
+        <dt>Net difference</dt><dd>${net > 0 ? "+" : ""}${net} units</dd>
+        <dt>Adjustment rows</dt><dd>${off.length}, all to ${esc(WAREHOUSE)}</dd>
+      </dl>
+      <label class="field"><span>Adjustment reason</span><input id="reason" value="${esc(DEFAULT_REASON)}" autocomplete="off"></label>
+      <p class="muted">Finalizing locks this count, saves the colour-coded archive and the SellerCloud adjustment file to the Inventory History library, and downloads the adjustment file to this computer. It doesn't change anything in SellerCloud.</p>
+      <label class="confirm"><input type="checkbox" id="chk-final"> <span>Rechecks are done and these numbers are final.</span></label>
+      <button id="btn-do-final" disabled>Finalize and save files</button>
+      <div id="final-progress" class="muted" style="margin-top:12px"></div>`;
+    $("#btn-back").addEventListener("click", () => go("variance"));
+    $("#chk-final").addEventListener("change", (ev) => { $("#btn-do-final").disabled = !ev.target.checked || !$("#reason").value.trim(); });
+    $("#reason").addEventListener("input", () => { $("#btn-do-final").disabled = !$("#chk-final").checked || !$("#reason").value.trim(); });
+    $("#btn-do-final").addEventListener("click", finalizeSession);
+  }
+
+  async function buildArchive(m, meta) {
+    const wb = new ExcelJS.Workbook();
+    wb.creator = "AFU cycle count app";
+    const ws = wb.addWorksheet("Cycle count", { views: [{ state: "frozen", ySplit: 1 }] });
+    ws.columns = [
+      { header: "SKU", key: "sku", width: 18 },
+      { header: "Area", key: "area", width: 18 },
+      { header: "Case qty", key: "cq", width: 10 },
+      { header: "SellerCloud on hand", key: "sc", width: 20 },
+      { header: "Counted", key: "counted", width: 10 },
+      { header: "Difference", key: "diff", width: 12 },
+      { header: "Full cases", key: "full", width: 11 },
+      { header: "Loose filters", key: "loose", width: 13 },
+      { header: "Round", key: "round", width: 8 },
+      { header: "Counted by", key: "by", width: 32 },
+      { header: "Note", key: "note", width: 40 }
+    ];
+    ws.getRow(1).font = { bold: true };
+    for (const r of m.rows) {
+      const row = ws.addRow({
+        sku: r.s.sku, area: r.s.area, cq: r.s.caseQty, sc: r.onHand, counted: r.counted, diff: r.diff,
+        full: r.latest.full, loose: r.latest.loose, round: r.latest.round, by: r.latest.by, note: r.latest.note || ""
+      });
+      // Same colours as the old Excel step: yellow fill with dark yellow text when SellerCloud is higher, light red with dark red text when lower.
+      const c = row.getCell("diff");
+      if (r.diff > 0) { c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFEB9C" } }; c.font = { color: { argb: "FF9C5700" }, bold: true }; }
+      if (r.diff < 0) { c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFC7CE" } }; c.font = { color: { argb: "FF9C0006" }, bold: true }; }
+    }
+    ws.autoFilter = { from: "A1", to: "K1" };
+
+    const sum = wb.addWorksheet("Summary");
+    sum.columns = [{ width: 28 }, { width: 40 }];
+    const off = m.rows.filter((r) => r.diff !== 0);
+    [
+      ["Count", meta.label],
+      ["Finalized by", meta.by],
+      ["Finalized at", new Date(meta.at).toLocaleString()],
+      ["SellerCloud snapshot imported", state.session.snapshotAt ? new Date(state.session.snapshotAt).toLocaleString() : ""],
+      ["SKUs counted", m.rows.length],
+      ["SKUs with a difference", off.length],
+      ["Higher in SellerCloud", off.filter((r) => r.diff > 0).length],
+      ["Lower in SellerCloud", off.filter((r) => r.diff < 0).length],
+      ["Net difference (units)", off.reduce((t, r) => t + r.diff, 0)],
+      ["Adjustment reason", meta.reason],
+      ["Not in the count list", m.notAssigned.length],
+      ["Missing from the SellerCloud export", m.missingFromExport.length]
+    ].forEach((pair) => { const row = sum.addRow(pair); row.getCell(1).font = { bold: true }; });
+
+    if (m.notAssigned.length || m.missingFromExport.length) {
+      const fl = wb.addWorksheet("Flags");
+      fl.columns = [{ header: "SKU", width: 18 }, { header: "Issue", width: 44 }, { header: "SellerCloud on hand", width: 20 }];
+      fl.getRow(1).font = { bold: true };
+      m.notAssigned.forEach((r) => fl.addRow([r.sku, "In the SellerCloud export but not in the count list", r.onHand]));
+      m.missingFromExport.forEach((s) => fl.addRow([s.sku, "In the count list but missing from the SellerCloud export", 0]));
+    }
+    return wb.xlsx.writeBuffer();
+  }
+
+  function buildAdjustments(m, reason) {
+    // Columns exactly as SellerCloud's Warehouse Inventory Adjustment template. AdjustmentQty is a change, not a new quantity.
+    const aoa = [["ID", "ProductID", "WarehouseName", "AdjustmentQty", "AdjustmentReason", "LocationNotes", "_ACTION_"]];
+    m.rows.filter((r) => r.diff !== 0).forEach((r) => aoa.push([null, r.s.sku, WAREHOUSE, r.counted - r.onHand, reason, null, null]));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), "Sheet1");
+    return { data: XLSX.write(wb, { bookType: "xls", type: "array" }), rows: aoa.length - 1 };
+  }
+
+  async function historyDrive() {
+    if (state.historyDrive) return state.historyDrive;
+    const drives = await graphAll(`/sites/${state.siteId}/drives?$select=id,name,webUrl`);
+    const d = drives.find((x) => x.name === "Inventory History");
+    if (!d) throw new Error("Can't find the Inventory History library.");
+    state.historyDrive = d;
+    return d;
+  }
+
+  async function ensureFolder(driveId, name) {
+    try { await graph("GET", `/drives/${driveId}/root:/${encodeURIComponent(name)}?$select=id`); return; }
+    catch (e) { if (e.status !== 404) throw e; }
+    try { await graph("POST", `/drives/${driveId}/root/children`, { name, folder: {}, "@microsoft.graph.conflictBehavior": "fail" }); }
+    catch (e) { if (e.status !== 409) throw e; }
+  }
+
+  function downloadLocally(data, filename, type) {
+    try {
+      const url = URL.createObjectURL(new Blob([data], { type }));
+      const a = document.createElement("a");
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      return true;
+    } catch (e) { return false; }
+  }
+
+  async function finalizeSession() {
+    const btn = $("#btn-do-final");
+    const prog = $("#final-progress");
+    const reason = $("#reason").value.trim();
+    btn.disabled = true; $("#chk-final").disabled = true; $("#reason").disabled = true;
+    const step = (t) => { prog.textContent = t; };
+    try {
+      step("Re-reading the latest counts…");
+      await loadSession(); await loadEntries(); await loadSnapshot(true);
+      if (!state.session) throw new Error("This session is no longer open.");
+      const m = varianceModel();
+      const blockers = finalizeBlockers(m);
+      if (blockers.length) throw new Error(blockers.join(" "));
+
+      const label = sessionLabel(state.session.title);
+      const me = state.account.username;
+      const at = new Date().toISOString();
+      const d8 = fileDate(state.session.title), year = fileYear(state.session.title);
+      const archiveName = `Inventory Cycle Count ${d8}.xlsx`;
+      const adjName = `SellerCloud Adjustments ${d8}.xls`;
+
+      step("Building the archive…");
+      const archive = await buildArchive(m, { label, by: me, at, reason });
+      const adj = buildAdjustments(m, reason);
+
+      step("Saving to the Inventory History library…");
+      const drive = await historyDrive();
+      await ensureFolder(drive.id, year);
+      const archiveItem = await graphUpload(`/drives/${drive.id}/root:/${encodeURIComponent(year)}/${encodeURIComponent(archiveName)}:/content`, archive);
+      const adjItem = await graphUpload(`/drives/${drive.id}/root:/${encodeURIComponent(year)}/${encodeURIComponent(adjName)}:/content`, adj.data);
+
+      step("Locking the session…");
+      await graph("PATCH", `${listPath("sessions")}/items/${state.session.id}/fields`, { Status: "Finalized", FinalizedBy: me, FinalizedAt: at });
+      // The archive link is a convenience; Graph's handling of link columns varies, so a failure here isn't fatal.
+      try { await graph("PATCH", `${listPath("sessions")}/items/${state.session.id}/fields`, { ArchiveUrl: `${archiveItem.webUrl}, ${archiveName}` }); } catch (e) { /* link stays blank */ }
+
+      const downloaded = downloadLocally(adj.data, adjName, "application/vnd.ms-excel");
+      state.finalResult = {
+        label, rows: m.rows.length, adjRows: adj.rows, reason, downloaded,
+        archiveName, archiveUrl: archiveItem.webUrl, adjName, adjUrl: adjItem.webUrl, adjData: adj.data, folderUrl: `${drive.webUrl}/${year}`
+      };
+      state.picked.clear();
+      await loadSession();
+      state.entries = []; state.snapshot = null; state.snapshotFor = null;
+      go("finalized");
+    } catch (e) {
+      btn.disabled = false; $("#chk-final").disabled = false; $("#reason").disabled = false;
+      prog.innerHTML = e instanceof AuthNeeded
+        ? `<span class="state bad">Stopped: sign in again using the bar at the top, then click Finalize again. Nothing was locked.</span>`
+        : `<span class="state bad">Stopped: ${esc(e.message)} Click Finalize again; files already saved are simply replaced.</span>`;
+    }
+  }
+
+  function renderFinalized() {
+    const f = state.finalResult;
+    $("#app").innerHTML = `
+      <h1>${esc(f.label)} count finalized</h1>
+      <p>${f.rows} SKUs counted. ${f.adjRows} adjustment${f.adjRows === 1 ? "" : "s"} for SellerCloud, reason "${esc(f.reason)}".</p>
+      <div class="actions" style="display:flex;gap:12px;flex-wrap:wrap;margin:16px 0 8px">
+        <a class="btnlink" href="${esc(f.archiveUrl)}" target="_blank" rel="noopener">Open the archive</a>
+        <button class="secondary" id="btn-dl-adj">Download the adjustment file again</button>
+      </div>
+      <p class="small">${f.downloaded ? `The adjustment file was downloaded as ${esc(f.adjName)}. ` : ""}Both files are in the <a href="${esc(f.folderUrl)}" target="_blank" rel="noopener">Inventory History</a> library.</p>
+      <div class="callout">
+        <h2>Next, in SellerCloud</h2>
+        <ol class="steps-done">
+          <li>Import <strong>${esc(f.adjName)}</strong> with the Warehouse Inventory Adjustment import, <strong>once</strong>. Each row is a change, so importing it twice applies every change twice.</li>
+          <li>Spot-check two or three SKUs afterwards: each one's on hand should have moved by exactly its AdjustmentQty in the file.</li>
+          <li>Returns Warehouse isn't in the file. Handle it by hand as before.</li>
+        </ol>
+      </div>
+      <button class="secondary" id="btn-home">Back to Home</button>`;
+    $("#btn-dl-adj").addEventListener("click", () => downloadLocally(f.adjData, f.adjName, "application/vnd.ms-excel"));
+    $("#btn-home").addEventListener("click", () => { state.finalResult = null; go("home"); });
   }
 
   // ---------- reviewer actions ----------
